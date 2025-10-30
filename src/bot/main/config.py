@@ -8,17 +8,14 @@ from os import environ
 @dataclass(frozen=True, slots=True)
 class BotConfig:
     token: str
-    owner_id: int
     root_locale: str = "ru"
 
     @classmethod
     def load_from_env(cls) -> Self:
         token: str = environ["BOT_TOKEN"]
-        owner_id: int = int(environ["OWNER_ID"])
 
         return cls(
             token=token,
-            owner_id=owner_id,
         )
 
 
@@ -26,16 +23,12 @@ class BotConfig:
 class GoogleCalendarConfig:
     credentials_file: str
     calendar_id: str
-    sheets_credentials_file: str
-    sheets_id: str
 
     @classmethod
     def load_from_env(cls) -> Self:
         return cls(
             credentials_file=environ["GOOGLE_CREDENTIALS_FILE"],
             calendar_id=environ["GOOGLE_CALENDAR_ID"],
-            sheets_credentials_file=environ["GOOGLE_SHEETS_CREDENTIALS_FILE"],
-            sheets_id=environ["GOOGLE_SHEETS_ID"]
         )
 
 
