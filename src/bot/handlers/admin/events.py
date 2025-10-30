@@ -6,6 +6,7 @@ from src.bot.db.repositories.admin import AdminRepository
 from src.bot.misc.callback_data.admin import AdminMenuCallback
 from src.bot.localization.translator import LocalizedTranslator
 from src.bot.misc.keyboards.admin.events import get_event_stats_keyboard
+from src.bot.services.deeplink_service import DeeplinkService
 
 router = Router(name="admin_events")
 
@@ -17,12 +18,19 @@ async def event_statistics(callback: CallbackQuery, translator: LocalizedTransla
         recent_events = await AdminRepository.get_recent_events()
 
         text = translator.get("event_stats_title") + "\n\n"
+        bot_username: str = (await callback.bot.get_me()).username
 
         for event in recent_events:
             stats = await AdminRepository.get_event_stats(event)
+            event_detail_link: str = DeeplinkService.get_event_details_link(
+                bot_username=bot_username,
+                event_id=event.id
+            )
+            event_title = f"<a href='{event_detail_link}'>{event.title}</a>"
+
             text += translator.get(
                 "event_stats_item",
-                title=event.title,
+                title=event_title,
                 going_count=stats['going_count'],
                 not_going_count=stats['not_going_count'],
                 thinking_count=stats['thinking_count']

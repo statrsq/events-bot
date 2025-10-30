@@ -4,6 +4,7 @@ from src.bot.db.models import User
 from src.bot.main.config import config
 from src.bot.misc.enums.user_role import UserRole
 from src.bot.db.repositories.users import UsersRepository
+from src.bot.services.deeplink_service import DeeplinkService
 
 
 async def create_or_update_user(tg_user: TgUser) -> tuple[bool, User]:
@@ -19,3 +20,9 @@ async def create_or_update_user(tg_user: TgUser) -> tuple[bool, User]:
         role=role
     )
     return is_created, user
+
+
+def get_user_link_str(user: User):
+    name_link = DeeplinkService.get_user_link(telegram_id=user.telegram_id, name=user.name)
+    username: str = f"@{user.username}" if user.username else ""
+    return f"{name_link} {username}"

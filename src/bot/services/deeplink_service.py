@@ -72,3 +72,7 @@ class DeeplinkService:
     @staticmethod
     def get_user_link(name: str, telegram_id: int) -> str:
         return f"<a href='tg://user?id={telegram_id}'>{name}</a>"
+
+    @staticmethod
+    def get_event_details_link(bot_username: str, event_id: int) -> str:
+        return f"t.me/{bot_username}?start=event_{event_id}"
