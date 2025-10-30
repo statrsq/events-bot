@@ -13,7 +13,7 @@ https://habr.com/ru/articles/525680/
 2) Переходим в Google Calendar
 * Открываем (или создаём новый) календарь
 * Открываем настройки
-* Shared with - добавляем email серсисного аккаунта
+* Shared with - добавляем email сервисного аккаунта
 Права: see all event details
 
 
