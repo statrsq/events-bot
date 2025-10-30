@@ -8,14 +8,17 @@ from os import environ
 @dataclass(frozen=True, slots=True)
 class BotConfig:
     token: str
+    owner_id: int
     root_locale: str = "ru"
 
     @classmethod
     def load_from_env(cls) -> Self:
         token: str = environ["BOT_TOKEN"]
+        owner_id: int = int(environ["OWNER_ID"] or 0)
 
         return cls(
             token=token,
+            owner_id=owner_id
         )
 
 

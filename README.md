@@ -19,8 +19,8 @@ https://habr.com/ru/articles/525680/
 
 ### 3. Настройка переменных окружения
 Скопируйте `example.env` в `.env` и заполните необходимые переменные:
-
-GOOGLE_CALENDAR_ID - из настроек Google-календаря: Integrate calendar -> Calendar ID
+* OWNER_ID - Telegram id владельца бота
+* GOOGLE_CALENDAR_ID - из настроек Google-календаря: Integrate calendar -> Calendar ID
 
 
 ### 3. Запуск бота
