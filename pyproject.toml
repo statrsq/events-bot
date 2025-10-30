@@ -1,0 +1,25 @@
+[project]
+name = "events-bot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aerich>=0.9.1",
+    "aiogram>=3.22.0",
+    "aiohttp>=3.12.15",
+    "anyio>=4.11.0",
+    "fluentogram>=1.2.1",
+    "google-api-python-client>=2.184.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.2",
+    "loguru>=0.7.3",
+    "pydantic>=2.11.7",
+    "python-dotenv>=1.1.1",
+    "tortoise-orm[asyncpg]>=0.25.1",
+]
+
+[tool.aerich]
+tortoise_orm = "src.bot.db.config.TORTOISE_ORM"
+location = "./migrations"
+src_folder = "./."
