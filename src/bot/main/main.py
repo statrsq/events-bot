@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 
-from src.bot.main.config import config
+from src.bot.main.config import Config, config
 from src.bot.localization.translator import Translator
 from src.bot.misc.middlewares.translator import TranslatorMiddleware
 from src.bot.db.engine import init_db, close_db
@@ -18,7 +18,8 @@ from src.bot.handlers.admin.user_management import router as admin_user_manageme
 from src.bot.handlers.admin.events import router as admin_events
 from src.bot.handlers.admin.broadcast import router as admin_broadcast
 from src.bot.handlers.admin.menu import router as admin_menu
-from src.bot.services.calendar_sync_service import get_calendar_sync_service
+from src.bot.services import calendar_sync_service
+from src.bot.services.notification_service import NotificationService
 
 properties: DefaultBotProperties = DefaultBotProperties(parse_mode=ParseMode.HTML)
 bot: Bot = Bot(token=config.bot.token, default=properties)
@@ -81,7 +82,11 @@ async def on_startup():
     await init_db()
 
     # Запуск фоновой синхронизации с Google Calendar
-    calendar_sync = await get_calendar_sync_service(bot)
+    notification_service = NotificationService(bot=bot)
+    calendar_sync = calendar_sync_service.get_or_create(
+        notification_service=notification_service, 
+        sync_timeout=config.google_calendar.sync_interval_seconds
+    )
     asyncio.create_task(calendar_sync.start_sync())
 
     logger.info("Бот запущен!")
@@ -89,8 +94,9 @@ async def on_startup():
 
 async def on_shutdown():
     # Остановка фоновой синхронизации
-    calendar_sync = await get_calendar_sync_service(bot)
-    await calendar_sync.stop_sync()
+    calendar_sync = calendar_sync_service.get()
+    if calendar_sync:
+        await calendar_sync.stop_sync()
     
     await close_db()
     logger.info("Бот остановлен!")

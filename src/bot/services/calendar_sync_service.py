@@ -1,6 +1,6 @@
 import asyncio
-from datetime import datetime, timezone, timedelta
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Final
 from loguru import logger
 
 from src.bot.services.google_calendar import google_calendar_service
@@ -11,244 +11,214 @@ from src.bot.db.repositories.events import EventsRepository
 
 
 class CalendarSyncService:
-    def __init__(self, bot):
-        self.bot = bot
-        self.notification_service = NotificationService(bot)
+    def __init__(
+        self, 
+        notification_service: NotificationService, 
+        sync_timeout: int = 60
+    ):
+        self.notification_service = notification_service
+        self.sync_timeout = sync_timeout  # частота синхронизации
         self.event_repo = EventsRepository
         self.is_running = False
-        self.sync_timeout = 30
 
     async def start_sync(self):
-        """Запуск фоновой синхронизации с Google Calendar"""
+        """Бесконечный фоновой цикл синхронизации."""
         if self.is_running:
             logger.warning("Синхронизация уже запущена")
             return
 
         self.is_running = True
-        logger.info("Запуск фоновой синхронизации с Google Calendar")
+        logger.info("Запуск фоновой синхронизации Google Calendar")
 
         while self.is_running:
             try:
-                await self.sync_events()
+                await self._sync_events()
             except Exception as e:
-                logger.error(f"Ошибка синхронизации событий: {e}")
+                logger.error(f"Ошибка синхронизации: {e}")
+
             await asyncio.sleep(self.sync_timeout)
 
     async def stop_sync(self):
-        """Остановка фоновой синхронизации"""
         self.is_running = False
         logger.info("Остановка фоновой синхронизации")
 
-    async def sync_events(self):
-        """Синхронизация событий с Google Calendar"""
-        try:
-            # Получаем события из Google Calendar
-            google_events = await google_calendar_service.get_events()
+    # MAIN SYNC
+    async def _sync_events(self):
+        """Основной метод: получает события, сверяет с БД, обрабатывает все изменения."""
+        # Полученные события из Google Calendar
+        google_events = await google_calendar_service.get_events()
 
-            # Получаем все активные события из БД для проверки отмен
-            active_events = await self.event_repo.get_all_active()
+        # События в базе
+        google_event_ids: set[str] = {event["id"] for event in google_events}
+        db_events = await self.event_repo.get_by_google_ids(google_event_ids)
+        db_events_map = {
+            event.google_event_id: event
+            for event in db_events
+        }
 
-            # Обрабатываем события
-            await self.process_events(google_events, active_events)
+        # Сверяем
+        for ge in google_events:
+            ge_id = ge["id"]
+            if ge_id in db_events_map:
+                await self._update_event(db_events_map[ge_id], ge)
+            else:
+                await self._create_event(ge)
 
-            # Отправляем напоминания
-            await self.notification_service.send_reminders()
+        await self.notification_service.send_reminders()
 
-        except Exception as e:
-            logger.error(f"Ошибка синхронизации событий: {e}")
+    # CREATE / UPDATE / DELETE
+    async def _create_event(self, ge: dict[str, Any]) -> None:
+        """Создание нового события."""
+        start = self._parse_gcal_datetime(ge.get("start"))
+        end = self._parse_gcal_datetime(ge.get("end"))
 
-    async def process_events(self, google_events: list, active_events: list) -> None:
-        """Обработка событий с проверкой отмен"""
-        google_event_ids: set[str] = {google_event["id"] for google_event in google_events}
-        existing_events = await self.event_repo.get_by_google_ids(google_event_ids)
-        existing_events_map = {event.google_event_id: event for event in existing_events}
+        description = ge.get("description", "")
+        parsed_cfg = google_calendar_service.parse_event_description(description)
 
-        # Проверяем отмененные события (есть в БД, но нет в Google Calendar)
-        await self._check_cancelled_events(active_events, google_event_ids)
+        event = await self.event_repo.create(
+            google_event_id=ge["id"],
+            title=ge.get("summary", "Без названия"),
+            description=description,
+            start_time=start,
+            end_time=end,
+            location=ge.get("location", ""),
+            status=EventStatus.ACTIVE,
+        )
 
-        # Обрабатываем существующие и новые события
-        for google_event in google_events:
-            google_event_id = google_event["id"]
+        # если create() провалилось
+        if not event:
+            return
 
-            if google_event_id in existing_events_map:  # Событие уже существует - проверяем изменения
-                await self._handle_existing_event(existing_events_map[google_event_id], google_event)
-            else:  # Новое событие - создаем и уведомляем
-                await self._handle_new_event(google_event)
+        # JSON-поля
+        await self.event_repo.update(
+            event,
+            reminder_intervals=parsed_cfg.get("reminder_intervals", []),
+            poll_interval=parsed_cfg.get("poll_interval", 24),
+            deadline=self._parse_gcal_datetime(parsed_cfg.get("deadline"))
+            if parsed_cfg.get("deadline")
+            else None,
+        )
 
-    async def _check_cancelled_events(self, active_events: list, google_event_ids: set) -> None:
-        """Проверяет события, которые были отменены (удалены из календаря)"""
-        try:
-            for event in active_events:
-                if event.google_event_id not in google_event_ids:
-                    # Событие есть в БД, но нет в Google Calendar - значит отменено
-                    await self._cancel_event(event)
-                    await self.notification_service.notify_event_cancelled(event)
-                    logger.info(f"Событие отменено (удалено из календаря): {event.title}")
+        logger.info(f"Создано новое событие: {event.title}")
+        await self.notification_service.notify_new_event(event)
+        
+    async def _cancel_event(self, local_event: Event):
+        """Удалить событие из БД + отправить уведомление"""
+        if local_event.status == EventStatus.CANCELLED:
+            return
 
-        except Exception as e:
-            logger.error(f"Ошибка проверки отмененных событий: {e}")
+        await self.event_repo.update(local_event, status=EventStatus.CANCELLED)
+        await self.notification_service.notify_event_cancelled(local_event)
+        logger.info(f"Событие удалено из календаря: [{local_event.google_event_id}] {local_event.title}")
 
-    async def _handle_new_event(self, google_event: dict) -> None:
-        """Обработка нового события"""
-        try:
-            event = await self._create_new_event(google_event)
-            if event:
-                logger.info(f"Обнаружено новое событие: {event.title}")
-                await self.notification_service.notify_new_event(event)
-        except Exception as e:
-            logger.error(f"Ошибка обработки нового события: {e}")
+    async def _update_event(self, local_event: Event, google_event: dict[str, Any]):
+        """Обновляет существующее событие, возвращает изменения."""
+        update_data = {}
 
-    async def _handle_existing_event(self, event: Event, google_event: dict) -> None:
-        """Обработка существующего события"""
-        try:
-            # Обновляем событие и проверяем тип изменений
-            changes = await self._update_existing_event(event, google_event)
+        if google_event.get("status") == "cancelled":
+            await self._cancel_event(local_event)
+            return
 
-            # Логируем изменения для отладки
-            if changes['any_changes']:
-                logger.info(f"Обнаружены изменения в событии {event.title}: {changes}")
+        # ------------ title ------------
+        new_title = google_event.get("summary")
+        if new_title and new_title != local_event.title:
+            update_data["title"] = new_title
 
-            # Проверяем изменения времени (перенос)
-            if changes.get('time_changed'):
-                await self.notification_service.notify_event_postponed(event)
-                logger.info(f"Событие перенесено: {event.title}")
+        # ------------ description ------------
+        new_descr = google_event.get("description", "")
+        if new_descr != local_event.description:
+            update_data["description"] = new_descr
 
-            elif changes.get('content_changed'):
-                logger.info(f"Событие обновлено (контент): {event.title}")
+        # ------------ datetime ------------
+        new_start = self._parse_gcal_datetime(google_event.get("start"))
+        new_end = self._parse_gcal_datetime(google_event.get("end"))
 
-        except Exception as e:
-            logger.error(f"Ошибка обработки существующего события {event.id}: {e}")
+        time_changed = False
 
-    async def _create_new_event(self, google_event_data: dict[str, Any]) -> Event | None:
-        """Создание нового события из данных Google Calendar"""
-        try:
-            start_time = self._parse_google_datetime(google_event_data['start'])
-            end_time = self._parse_google_datetime(google_event_data['end'])
+        if new_start and new_start != local_event.start_time:
+            update_data["start_time"] = new_start
+            time_changed = True
 
-            logger.debug(f"Создание события: {google_event_data.get('summary')}")
-            logger.debug(f"Start time raw: {google_event_data['start']}")
-            logger.debug(f"Start time parsed: {start_time}")
-            logger.debug(f"End time raw: {google_event_data['end']}")
-            logger.debug(f"End time parsed: {end_time}")
+        if new_end and new_end != local_event.end_time:
+            update_data["end_time"] = new_end
+            time_changed = True
 
-            event = await self.event_repo.create(
-                google_event_id=google_event_data['id'],
-                title=google_event_data.get('summary', 'Без названия'),
-                description=google_event_data.get('description', ''),
-                start_time=start_time,
-                end_time=end_time,
-                location=google_event_data.get('location', ''),
-                status=EventStatus.ACTIVE
-            )
+        # ------------ location ------------
+        new_loc = google_event.get("location", "")
+        if new_loc != local_event.location:
+            update_data["location"] = new_loc
 
-            if event:
-                logger.info(f"Создано новое событие: {event.title}")
+        # ------------ JSON config ------------
+        parsed_cfg = google_calendar_service.parse_event_description(
+            google_event.get("description", "")
+        )
 
-            return event
+        # update_data["reminder_intervals"] = parsed_cfg.get(
+        #     "reminder_intervals", local_event.reminder_intervals
+        # )
+        # update_data["poll_interval"] = parsed_cfg.get(
+        #     "poll_interval", local_event.poll_interval
+        # )
 
-        except Exception as e:
-            logger.error(f"Ошибка создания нового события: {e}")
+        # if parsed_cfg.get("deadline"):
+        #     update_data["deadline"] = self._parse_gcal_datetime(parsed_cfg["deadline"])
+
+        # ------------ save if changed ------------
+        if update_data:
+            await self.event_repo.update(local_event, **update_data)
+
+            if time_changed:
+                logger.info(f"Событие перенесено: {local_event.title}")
+                await self.notification_service.notify_event_postponed(local_event)
+            else:
+                logger.info(f"Событие обновлено: {local_event.title}")
+
+    # DATETIME PARSING
+    def _parse_gcal_datetime(self, obj: dict | str | None) -> datetime | None:
+        """Google Calendar datetime parsing → UTC aware."""
+        if not obj:
             return None
 
-    async def _update_existing_event(self, event: Event, google_event_data: dict[str, Any]) -> dict:
-        """Обновление существующего события и возврат информации об изменениях"""
         try:
-            update_data = {}
-            changes = {
-                'time_changed': False,
-                'content_changed': False,
-                'any_changes': False
-            }
-
-            # Проверяем изменения в названии
-            new_title = google_event_data.get('summary', '')
-            if new_title and new_title != event.title:
-                update_data['title'] = new_title
-                changes['content_changed'] = True
-
-            # Проверяем изменения в описании
-            new_description = google_event_data.get('description', '')
-            if new_description != event.description:
-                update_data['description'] = new_description
-                changes['content_changed'] = True
-
-            # Проверяем изменения во времени
-            new_start = self._parse_google_datetime(google_event_data['start'])
-            if new_start and new_start != event.start_time:
-                update_data['start_time'] = new_start
-                changes['time_changed'] = True
-
-            new_end = self._parse_google_datetime(google_event_data['end'])
-            if new_end and new_end != event.end_time:
-                update_data['end_time'] = new_end
-                changes['time_changed'] = True
-
-            # Проверяем изменения в локации
-            new_location = google_event_data.get('location', '')
-            if new_location != event.location:
-                update_data['location'] = new_location
-                changes['content_changed'] = True
-
-            if update_data:
-                success = await self.event_repo.update(event, **update_data)
-                changes['any_changes'] = success
-                return changes
-
-            return changes
-
-        except Exception as e:
-            logger.error(f"Ошибка обновления события {event.id}: {e}")
-            return {'time_changed': False, 'content_changed': False, 'any_changes': False}
-
-    async def _cancel_event(self, event: Event) -> bool:
-        """Отмена события"""
-        return await self.event_repo.update(event, status=EventStatus.CANCELLED)
-
-    def _parse_google_datetime(self, datetime_dict: dict) -> datetime | None:
-        """Парсинг datetime из Google Calendar API с конвертацией в UTC для базы данных"""
-        try:
-            if 'dateTime' in datetime_dict:
-                dt_str = datetime_dict['dateTime']
-                logger.debug(f"Парсим datetime: {dt_str}")
-
-                if dt_str.endswith('Z'):
-                    # UTC время - оставляем как есть
-                    dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+            # full object {"dateTime": "..."} OR {"date": "2025-01-01"}
+            if isinstance(obj, dict):
+                if "dateTime" in obj:
+                    dt = obj["dateTime"]
+                elif "date" in obj:
+                    # All-day event
+                    d = datetime.fromisoformat(obj["date"])
+                    return d.replace(tzinfo=timezone.utc)
                 else:
-                    # Время с явным часовым поясом - конвертируем в UTC
-                    dt = datetime.fromisoformat(dt_str)
-                    dt = dt.astimezone(timezone.utc)
+                    return None
+            else:
+                # deadline from JSON in description
+                dt = obj
 
-                return dt
+            # endswith Z → already UTC
+            if dt.endswith("Z"):
+                return datetime.fromisoformat(dt.replace("Z", "+00:00"))
 
-            elif 'date' in datetime_dict:
-                # Для целых дней
-                date_str = datetime_dict['date']
-                dt = datetime.fromisoformat(date_str)
-                # Для целых дней используем начало дня в UTC
-                return dt.replace(tzinfo=timezone.utc)
+            # other timezone → convert to UTC
+            dt = datetime.fromisoformat(dt)
+            return dt.astimezone(timezone.utc)
 
-            return None
         except Exception as e:
-            logger.error(f"Ошибка парсинга datetime: {datetime_dict}, {e}")
+            logger.error(f"Ошибка парсинга времени: {obj} -> {e}")
             return None
 
-    def _ensure_aware_datetime(self, dt: datetime) -> datetime:
-        """Преобразует datetime в UTC для сохранения в базе"""
-        if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-            # Если часовой пояс не указан, считаем что это UTC
-            return dt.replace(tzinfo=timezone.utc)
-        # Конвертируем в UTC
-        return dt.astimezone(timezone.utc)
 
+# SINGLETON
+calendar_sync_service: Final[CalendarSyncService] = None
 
-# Глобальный экземпляр сервиса
-calendar_sync_service = None
-
-
-async def get_calendar_sync_service(bot):
-    """Получение экземпляра сервиса синхронизации"""
+def get_or_create(
+    notification_service: NotificationService,
+    sync_timeout: int
+) -> CalendarSyncService:
     global calendar_sync_service
     if calendar_sync_service is None:
-        calendar_sync_service = CalendarSyncService(bot)
+        calendar_sync_service = CalendarSyncService(notification_service, sync_timeout)
+    return calendar_sync_service
+
+def get() -> CalendarSyncService | None:
+    global calendar_sync_service
     return calendar_sync_service

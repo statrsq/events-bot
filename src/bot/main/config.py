@@ -26,12 +26,14 @@ class BotConfig:
 class GoogleCalendarConfig:
     credentials_file: str
     calendar_id: str
+    sync_interval_seconds: int
 
     @classmethod
     def load_from_env(cls) -> Self:
         return cls(
             credentials_file=environ["GOOGLE_CREDENTIALS_FILE"],
             calendar_id=environ["GOOGLE_CALENDAR_ID"],
+            sync_interval_seconds=int(environ["GOOGLE_CALENDAR_SYNC_INTERVAL_SECONDS"] or 60),
         )
 
 
