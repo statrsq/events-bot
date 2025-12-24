@@ -11,6 +11,15 @@ services:
       POSTGRES_DB: ${POSTGRES_DATABASE}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bot_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   bot:
     build: .
@@ -18,7 +27,18 @@ services:
     env_file:
       - .env
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    networks:
+      - bot_network
+    volumes:
+      - ./logs:/app/logs
+    restart: always
+    stop_grace_period: 30s
 
 volumes:
   postgres_data:
+
+networks:
+  bot_network:
+    driver: bridge
