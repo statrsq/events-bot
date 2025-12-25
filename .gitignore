@@ -4,10 +4,10 @@ build/
 dist/
 wheels/
 *.egg-info
-.env
 venv/
 .venv/
 *.session
 *.session-journal
 .idea
 credentials.json
+.env
